@@ -1,62 +1,68 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-import re
+from functools import reduce
 
-st.title("📊 多Sheet按SN保留最新记录并汇总（支持变动列名）")
+st.title("📁 多文件多Sheet按SN保留最新记录并合并")
 
-uploaded_file = st.file_uploader("请上传包含多个Sheet的Excel文件", type=["xlsx"])
+uploaded_files = st.file_uploader("请上传一个或多个 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
-# 智能识别 SN 列名
-def find_sn_column(columns):
+def find_column(columns, keywords):
+    """模糊匹配列名，返回第一个匹配的列"""
     for col in columns:
         col_clean = col.strip().lower().replace(" ", "")
-        if col_clean in ["sn", "serialnumber", "sfc"]:
-            return col
+        for kw in keywords:
+            if kw in col_clean:
+                return col
     return None
 
-if uploaded_file:
-    all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+if uploaded_files:
     sn_dfs = []
 
-    for sheet_name, df in all_sheets.items():
-        st.write(f"📄 正在处理 Sheet：**{sheet_name}**")
+    for file in uploaded_files:
+        all_sheets = pd.read_excel(file, sheet_name=None)
+        st.write(f"📂 正在处理文件：**{file.name}**")
 
-        sn_col = find_sn_column(df.columns)
-        if sn_col and {'Date', 'Time'}.issubset(df.columns):
-            # 合并日期时间列
-            df['DateTime'] = pd.to_datetime(
-                df['Date'].astype(str) + ' ' + df['Time'].astype(str),
-                errors='coerce'
-            )
-            df = df.dropna(subset=['DateTime'])
+        for sheet_name, df in all_sheets.items():
+            st.write(f" 📄 Sheet：**{sheet_name}**")
 
-            # 标准化 SN 列名为 'SN'
-            df = df.rename(columns={sn_col: 'SN'})
+            if df.empty:
+                st.warning(f" ⚠️ Sheet「{sheet_name}」为空，跳过。")
+                continue
 
-            # 按 SN 取最后一条记录
-            df_latest = df.sort_values('DateTime').groupby('SN', as_index=False).last()
+            sn_col = find_column(df.columns, ['sn', 'serialnumber', 'sfc'])
+            date_col = find_column(df.columns, ['testdate', 'date'])
+            time_col = find_column(df.columns, ['testtime', 'time'])
 
-            # 给列加上 Sheet 前缀，SN 除外
-            df_latest = df_latest.rename(columns=lambda col: f"{sheet_name}_{col}" if col != 'SN' else col)
+            if sn_col and date_col and time_col:
+                df['DateTime'] = pd.to_datetime(
+                    df[date_col].astype(str) + ' ' + df[time_col].astype(str),
+                    errors='coerce'
+                )
+                df = df.dropna(subset=['DateTime'])
 
-            sn_dfs.append(df_latest)
-        else:
-            st.warning(f"⚠️ Sheet「{sheet_name}」缺少 SN/Date/Time 列，或格式不正确，已跳过。")
+                df = df.rename(columns={sn_col: 'SN'})
+
+                df_latest = df.sort_values('DateTime').groupby('SN', as_index=False).last()
+
+                prefix = f"{file.name}_{sheet_name}"
+                df_latest = df_latest.rename(columns=lambda col: f"{prefix}_{col}" if col != 'SN' else col)
+
+                sn_dfs.append(df_latest)
+            else:
+                st.warning(f" ⚠️ 跳过 Sheet「{sheet_name}」：未检测到 SN、Date、Time 列。")
 
     if sn_dfs:
-        # 合并所有 Sheet（横向合并）
-        from functools import reduce
         merged_df = reduce(lambda left, right: pd.merge(left, right, on='SN', how='outer'), sn_dfs)
 
-        st.success("✅ 处理完成！以下是结果预览：")
+        st.success("✅ 所有文件处理完成！以下是合并结果预览：")
         st.dataframe(merged_df.head(20))
 
-        # 导出为 Excel
+        # 转为 Excel
         def convert_df_to_excel(df):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='SN汇总结果')
+                df.to_excel(writer, index=False, sheet_name='汇总结果')
             return output.getvalue()
 
         excel_data = convert_df_to_excel(merged_df)
@@ -64,8 +70,8 @@ if uploaded_file:
         st.download_button(
             label="📥 下载汇总结果 Excel",
             data=excel_data,
-            file_name="SN汇总结果.xlsx",
+            file_name="SN_汇总结果.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.error("❌ 没有找到包含有效 SN/Date/Time 的 Sheet，未能生成汇总结果。")
+        st.error("❌ 没有找到有效数据，未能生成结果。")
